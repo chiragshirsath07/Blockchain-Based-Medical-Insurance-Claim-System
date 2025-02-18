@@ -1,0 +1,214 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+// Main Insurance Contract to manage the system
+contract InsuranceManager {
+    address public owner;
+    mapping(address => bool) public insurers;
+    mapping(address => bool) public healthcareProviders;
+    mapping(address => Patient) public patients;
+    
+    struct Patient {
+        bool isRegistered;
+        string name;
+        string policyNumber;
+        uint256 coverageAmount;
+        bool isActive;
+    }
+    
+    event PatientRegistered(address patientAddress, string name, string policyNumber);
+    event InsurerAdded(address insurerAddress);
+    event HealthcareProviderAdded(address providerAddress);
+    
+    constructor() {
+        owner = msg.sender;
+    }
+    
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Only owner can perform this action");
+        _;
+    }
+    
+    modifier onlyInsurer() {
+        require(insurers[msg.sender], "Only insurer can perform this action");
+        _;
+    }
+    
+    function addInsurer(address _insurerAddress) external onlyOwner {
+        insurers[_insurerAddress] = true;
+        emit InsurerAdded(_insurerAddress);
+    }
+    
+    function addHealthcareProvider(address _providerAddress) external onlyOwner {
+        healthcareProviders[_providerAddress] = true;
+        emit HealthcareProviderAdded(_providerAddress);
+    }
+    
+    function registerPatient(
+        address _patientAddress,
+        string memory _name,
+        string memory _policyNumber,
+        uint256 _coverageAmount
+    ) external onlyInsurer {
+        patients[_patientAddress] = Patient({
+            isRegistered: true,
+            name: _name,
+            policyNumber: _policyNumber,
+            coverageAmount: _coverageAmount,
+            isActive: true
+        });
+        
+        emit PatientRegistered(_patientAddress, _name, _policyNumber);
+    }
+}
+
+// Contract to handle claims
+contract ClaimHandler {
+    InsuranceManager public insuranceManager;
+    uint256 public claimCounter;
+    
+    struct Claim {
+        uint256 claimId;
+        address patient;
+        address healthcareProvider;
+        uint256 amount;
+        string treatmentDetails;
+        ClaimStatus status;
+        uint256 timestamp;
+        string documents; // IPFS hash of documents
+    }
+    
+    enum ClaimStatus { Submitted, UnderReview, Approved, Rejected, Paid }
+    
+    mapping(uint256 => Claim) public claims;
+    
+    event ClaimSubmitted(uint256 claimId, address patient, uint256 amount);
+    event ClaimStatusUpdated(uint256 claimId, ClaimStatus status);
+    event ClaimPaid(uint256 claimId, address recipient, uint256 amount);
+    
+    constructor(address _insuranceManager) {
+        insuranceManager = InsuranceManager(_insuranceManager);
+        claimCounter = 0;
+    }
+    
+    modifier onlyRegisteredPatient() {
+        require(insuranceManager.patients(msg.sender).isRegistered, "Patient not registered");
+        require(insuranceManager.patients(msg.sender).isActive, "Patient policy not active");
+        _;
+    }
+    
+    modifier onlyInsurer() {
+        require(insuranceManager.insurers(msg.sender), "Only insurer can perform this action");
+        _;
+    }
+    
+    function submitClaim(
+        uint256 _amount,
+        string memory _treatmentDetails,
+        address _healthcareProvider,
+        string memory _documents
+    ) external onlyRegisteredPatient {
+        require(_amount > 0, "Claim amount must be greater than 0");
+        require(insuranceManager.healthcareProviders(_healthcareProvider), "Invalid healthcare provider");
+        
+        claimCounter++;
+        claims[claimCounter] = Claim({
+            claimId: claimCounter,
+            patient: msg.sender,
+            healthcareProvider: _healthcareProvider,
+            amount: _amount,
+            treatmentDetails: _treatmentDetails,
+            status: ClaimStatus.Submitted,
+            timestamp: block.timestamp,
+            documents: _documents
+        });
+        
+        emit ClaimSubmitted(claimCounter, msg.sender, _amount);
+    }
+    
+    function updateClaimStatus(uint256 _claimId, ClaimStatus _status) external onlyInsurer {
+        require(_claimId <= claimCounter && _claimId > 0, "Invalid claim ID");
+        require(_status != ClaimStatus.Submitted, "Cannot revert to submitted status");
+        
+        Claim storage claim = claims[_claimId];
+        claim.status = _status;
+        
+        emit ClaimStatusUpdated(_claimId, _status);
+        
+        if (_status == ClaimStatus.Paid) {
+            emit ClaimPaid(_claimId, claim.patient, claim.amount);
+        }
+    }
+}
+
+// Contract to handle verification of claims
+contract VerificationHandler {
+    InsuranceManager public insuranceManager;
+    ClaimHandler public claimHandler;
+    
+    struct Verification {
+        bool documentsVerified;
+        bool amountVerified;
+        bool treatmentVerified;
+        string notes;
+        address verifiedBy;
+        uint256 timestamp;
+    }
+    
+    mapping(uint256 => Verification) public verifications;
+    
+    event VerificationCompleted(uint256 claimId, address verifier);
+    
+    constructor(address _insuranceManager, address _claimHandler) {
+        insuranceManager = InsuranceManager(_insuranceManager);
+        claimHandler = ClaimHandler(_claimHandler);
+    }
+    
+    modifier onlyInsurer() {
+        require(insuranceManager.insurers(msg.sender), "Only insurer can perform this action");
+        _;
+    }
+    
+    function verifyClaim(
+        uint256 _claimId,
+        bool _documentsVerified,
+        bool _amountVerified,
+        bool _treatmentVerified,
+        string memory _notes
+    ) external onlyInsurer {
+        verifications[_claimId] = Verification({
+            documentsVerified: _documentsVerified,
+            amountVerified: _amountVerified,
+            treatmentVerified: _treatmentVerified,
+            notes: _notes,
+            verifiedBy: msg.sender,
+            timestamp: block.timestamp
+        });
+        
+        emit VerificationCompleted(_claimId, msg.sender);
+        
+        // If all verifications pass, update claim status
+        if (_documentsVerified && _amountVerified && _treatmentVerified) {
+            claimHandler.updateClaimStatus(_claimId, ClaimHandler.ClaimStatus.Approved);
+        }
+    }
+    
+    function getVerificationStatus(uint256 _claimId) external view returns (
+        bool documentsVerified,
+        bool amountVerified,
+        bool treatmentVerified,
+        string memory notes,
+        address verifiedBy,
+        uint256 timestamp
+    ) {
+        Verification memory verification = verifications[_claimId];
+        return (
+            verification.documentsVerified,
+            verification.amountVerified,
+            verification.treatmentVerified,
+            verification.notes,
+            verification.verifiedBy,
+            verification.timestamp
+        );
+    }
+}
